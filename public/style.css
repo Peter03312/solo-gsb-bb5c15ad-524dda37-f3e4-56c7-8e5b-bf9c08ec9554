@@ -261,3 +261,36 @@ button.fault-btn { color: var(--fault); border-color: #6b512c; margin-top: 2px; 
 .hint-flag.flag-fault-self { font-weight: 700; }
 .fault-history { margin-top: 10px; font-size: 13px; }
 .fault-history li { margin: 6px 0; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+
+/* 现场换班交接 */
+.handover-panel { border-left: 4px solid #b9a7f2; margin-bottom: 16px; }
+.handover-panel.collapsed { border-left-color: var(--border); }
+.status.handover-pending-chip { color: #b9a7f2; font-size: 12px; }
+.handover-form input { font-size: 13px; }
+.handover-pending-card {
+  border: 1px solid #4a3f6b; border-radius: 8px; padding: 12px 14px;
+  margin-top: 10px; background: rgba(185, 167, 242, 0.06);
+}
+.handover-pending-card.stale { border-color: var(--fault); background: rgba(255, 159, 67, 0.07); }
+.handover-note { margin: 8px 0 6px; font-size: 14px; }
+.handover-snap-meta { font-size: 12px; line-height: 1.7; }
+.handover-cue-table .fired { color: var(--fired); }
+.handover-cue-table .skipped { color: var(--skipped); }
+.handover-cue-table .blocked { color: var(--blocked); }
+.handover-cue-table .pending { color: var(--pending); }
+.hint-flag.flag-blocked { color: var(--blocked); border-color: var(--blocked); }
+.hint-flag.flag-pending { color: var(--pending); border-color: var(--pending); }
+
+.badge.handover-ok-badge { background: #2e2a4a; color: #b9a7f2; }
+.badge.handover-stale-badge { background: var(--fault-bg); color: var(--fault); border: 1px solid var(--fault); }
+.badge.handover-signed-badge { background: #14342a; color: var(--fired); }
+.handover-diff-box { margin: 10px 0 0; }
+.handover-diff-ok { margin: 10px 0 0; }
+.handover-diff-events { margin-top: 8px; font-size: 13px; }
+.handover-change-cue_result { color: #d8a45a; border-color: #6b512c; }
+.handover-change-cue_blockers { color: var(--blocked); border-color: var(--blocked); }
+.handover-change-request_added, .handover-change-request_removed { color: #b9a7f2; border-color: #b9a7f2; }
+.handover-change-fault_added, .handover-change-fault_resolved { color: var(--fault); border-color: var(--fault); }
+.handover-history { margin-top: 12px; font-size: 13px; }
+.handover-history ul { padding-left: 0; margin: 6px 0 0; list-style: none; }
+.handover-history li { margin: 6px 0; padding-bottom: 6px; border-bottom: 1px dashed var(--border); }

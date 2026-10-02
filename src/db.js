@@ -122,6 +122,30 @@ CREATE TABLE IF NOT EXISTS cue_faults (
 CREATE INDEX IF NOT EXISTS idx_faults_perf ON cue_faults(performance_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_faults_active_unique
   ON cue_faults (performance_id, cue_id) WHERE status = 'active';
+
+-- 现场换班交接单：交班人在当前可操作演出填写交班人 / 接班人 / 交接说明，形成待签收单。
+-- snapshot 为提交瞬间的固定快照（各提示有效结果、最新流水位置、待复核申请、未解除故障、
+-- 未完成提示及阻塞原因）；交接期间现场操作照常，接班人签收时按最新状态逐项核对，
+-- 任一快照内容已变化则返回差异并保持待签收，由原交班人重提替换快照；核对通过才签收。
+-- 签收（signed）后为不可变历史；同一演出至多一张待签收单（部分唯一索引），
+-- 重提只更新同一行（revision+1），签收后可再发起新一张，历史全部保留。
+CREATE TABLE IF NOT EXISTS cue_handovers (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  performance_id INTEGER NOT NULL REFERENCES performances(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','signed')),
+  revision       INTEGER NOT NULL DEFAULT 1,
+  from_person    TEXT NOT NULL,
+  to_person      TEXT NOT NULL,
+  note           TEXT NOT NULL,
+  snapshot       TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  signed_at      TEXT,
+  signed_by      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_handovers_perf ON cue_handovers(performance_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_handover_pending_unique
+  ON cue_handovers (performance_id) WHERE status = 'pending';
 `);
 
 /**
