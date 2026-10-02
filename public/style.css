@@ -239,6 +239,30 @@ th { color: var(--muted); font-weight: 500; font-size: 13px; }
 .batch-preview-table .fired { color: var(--fired); }
 .batch-preview-table .blocked { color: var(--blocked); display: block; }
 
+/* 现场换班交接 */
+.handover-panel { border-left: 4px solid #b9a7f2; margin-bottom: 16px; }
+.handover-panel.has-pending { border-left-color: #b9a7f2; background: #222030; }
+.status.handover-pending-chip { color: #b9a7f2; }
+.badge.handover-badge { background: #2e2a4a; color: #b9a7f2; border: 1px solid #b9a7f2; }
+.badge.handover-signed { background: #14342a; color: var(--fired); }
+.badge.handover-superseded { background: #262a35; color: var(--muted); }
+.handover-pending { font-size: 13px; }
+.handover-note {
+  margin: 8px 0; padding: 8px 12px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--border); font-size: 13px;
+}
+.handover-details { margin-top: 8px; font-size: 13px; }
+.handover-snap-details { margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--border); }
+.handover-subblock { margin-top: 8px; font-size: 13px; }
+.handover-mini-list { padding-left: 0; margin: 6px 0 0; list-style: none; }
+.handover-mini-list li { margin: 5px 0; padding-bottom: 5px; border-bottom: 1px dashed var(--border); font-size: 13px; }
+.handover-mini-list li:last-child { border-bottom: none; }
+.handover-diff-table td { vertical-align: top; }
+.hint-flag.flag-handover-diff { color: var(--blocked); border-color: var(--blocked); white-space: nowrap; }
+.handover-diff-bad { margin: 10px 0; }
+.handover-diff-ok { margin: 10px 0; }
+.handover-form textarea { width: 100%; resize: vertical; }
+
 /* 现场设备故障 */
 .status.fault-active { color: var(--fault); }
 .badge.fault-badge { background: var(--fault-bg); color: var(--fault); border: 1px solid var(--fault); margin-left: 4px; }

@@ -490,6 +490,14 @@ route('GET', '/api/performances/:id', (body, p) => {
     };
   });
 
+  // 现场换班交接：当前待签收交接单（附按最新状态实时计算的差异）与全部交接历史
+  // （已签收为不可变历史；被重提替换 / 接续作废旧单同样留痕）
+  const pendingHandover = pendingHandoverRow(perf.id);
+  const handover = pendingHandover
+    ? presentHandover(pendingHandover, diffHandoverSnapshot(perf, parseSnapshot(pendingHandover)))
+    : null;
+  const handover_history = handoverListRows(perf.id).map((row) => presentHandover(row, null));
+
   return {
     performance: perf,
     continuation,
@@ -499,6 +507,8 @@ route('GET', '/api/performances/:id', (body, p) => {
     review_requests: reviewRequests,
     faults,
     active_fault_count: activeFaults.length,
+    handover,
+    handover_history,
   };
 });
 
@@ -1233,6 +1243,14 @@ function continuePerformance(perf, target, operator, name) {
       WHERE id = ?
     `).run(operator, fresh.id);
 
+    // 原演出的待签收交接单随接续一并作废旧单（只读演出不能提交、重提或签收）；
+    // 已签收历史与被替换旧单原样保留。串行判定保证此刻不会与签收 / 重提交叉。
+    db.prepare(`
+      UPDATE cue_handovers SET status = 'superseded',
+        superseded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE performance_id = ? AND status = 'pending'
+    `).run(fresh.id);
+
     const newPerf = db.prepare('SELECT * FROM performances WHERE id = ?').get(newId);
     return {
       performance: newPerf,
@@ -1255,6 +1273,498 @@ route('POST', '/api/performances/:id/continue', (body, p) => {
   const target = resolveContinueTarget(perf, body.version_id);
   const name = String(body.name || '').trim().slice(0, 100);
   return continuePerformance(perf, target, operator, name);
+});
+
+/* ---- 现场换班交接（提交 / 重提替换 / 签收核对；与现场操作、复核、故障、接续同一 BEGIN IMMEDIATE 串行判定） ---- */
+
+const HANDOVER_STATUS_TEXT = { pending: '待签收', signed: '已签收', superseded: '已被重提替换' };
+// 尚未完成提示的阻塞原因（快照固定，签收时按最新状态逐项核对）
+const PENDING_REASON_TEXT = {
+  blocked: '受阻：前置未触发',
+  review_pending: '待复核申请未处置',
+  own_fault: '本提示有未解除故障',
+  fault_blocked: '受未解除故障影响，触发冻结',
+  pending: '待执行',
+};
+
+/** 该演出当前待签收交接单（无则 null）。须在事务内调用以读到最新状态 */
+function pendingHandoverRow(performanceId) {
+  return db.prepare(
+    "SELECT * FROM cue_handovers WHERE performance_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1"
+  ).get(performanceId) || null;
+}
+
+/** 该演出全部交接单（最新在上） */
+function handoverListRows(performanceId) {
+  return db.prepare(
+    'SELECT * FROM cue_handovers WHERE performance_id = ? ORDER BY id DESC'
+  ).all(performanceId);
+}
+
+function parseSnapshot(row) {
+  try {
+    return JSON.parse(row.snapshot);
+  } catch {
+    return null;
+  }
+}
+
+function cueEffectiveSummary(latestByCue, cueId) {
+  const e = latestByCue.get(cueId) || null;
+  return e && e.action !== 'retracted'
+    ? { action: e.action, event_id: e.id, operator: e.operator, created_at: e.created_at }
+    : null;
+}
+
+/**
+ * 固定交接快照：各提示当前有效结果、最新流水位置（cue_events 最大 id）、
+ * 待复核申请（全部申请状态；含待处理明细）、未解除故障（含沿前置关系的影响范围）、
+ * 尚未完成的提示（无有效结果）及阻塞原因。
+ * 须在 BEGIN IMMEDIATE 事务内调用，保证与提交 / 签收判定读到同一状态。
+ */
+function buildHandoverSnapshot(perf) {
+  const cues = getVersionCues(perf.version_id);
+  const latestByCue = latestEventsByCue(perf.id);
+  const firedLabels = new Set();
+  for (const c of cues) {
+    const e = latestByCue.get(c.id);
+    if (e && e.action === 'fired') firedLabels.add(c.label);
+  }
+
+  const impact = faultImpact(cues, activeFaultRows(perf.id));
+  const ownFaultCueIds = new Set(impact.faults.map((f) => f.cue_id));
+
+  const pendingRequests = db.prepare(`
+    SELECT r.*, c.label AS label FROM cue_review_requests r
+    JOIN cues c ON c.id = r.cue_id
+    WHERE r.performance_id = ? ORDER BY r.id
+  `).all(perf.id);
+
+  const cue_results = cues.map((c) => {
+    const summary = cueEffectiveSummary(latestByCue, c.id);
+    return {
+      cue_id: c.id,
+      label: c.label,
+      seq: c.seq,
+      status: summary ? summary.action : null, // fired / skipped / null
+      event_id: summary ? summary.event_id : null,
+      operator: summary ? summary.operator : null,
+      created_at: summary ? summary.created_at : null,
+    };
+  });
+
+  const pending_cues = [];
+  for (const c of cues) {
+    if (cueEffectiveSummary(latestByCue, c.id)) continue; // 已有有效结果（已触发 / 已跳过）即已完成
+    const reasons = [];
+    const unmet = c.deps.filter((d) => !firedLabels.has(d));
+    if (unmet.length) reasons.push({ code: 'blocked', text: PENDING_REASON_TEXT.blocked, unmet });
+    const req = pendingRequestFor(perf.id, c.id);
+    if (req) {
+      reasons.push({
+        code: 'review_pending',
+        text: PENDING_REASON_TEXT.review_pending,
+        requested_by: req.requested_by,
+        requested_at: req.requested_at,
+        request_id: req.id,
+      });
+    }
+    if (ownFaultCueIds.has(c.id)) reasons.push({ code: 'own_fault', text: PENDING_REASON_TEXT.own_fault });
+    else if ((impact.blockedByLabel.get(c.label) || []).length) {
+      reasons.push({ code: 'fault_blocked', text: PENDING_REASON_TEXT.fault_blocked });
+    }
+    if (!reasons.length) reasons.push({ code: 'pending', text: PENDING_REASON_TEXT.pending });
+    pending_cues.push({
+      cue_id: c.id,
+      label: c.label,
+      seq: c.seq,
+      reasons,
+      reason_codes: reasons.map((r) => r.code),
+      reason_text: reasons.map((r) => {
+        if (r.code === 'blocked') return `${r.text}（${r.unmet.join('、')}）`;
+        if (r.code === 'review_pending') return `${r.text}（申请人 ${r.requested_by}）`;
+        return r.text;
+      }).join('；'),
+    });
+  }
+
+  return {
+    version: 20261002,
+    taken_at: new Date().toISOString(),
+    version_id: perf.version_id,
+    latest_event_id: latestByCue.size
+      ? Math.max(...[...latestByCue.values()].map((e) => e.id))
+      : null,
+    cue_results,
+    pending_requests: pendingRequests.map((r) => ({
+      request_id: r.id,
+      cue_id: r.cue_id,
+      label: r.label,
+      status: r.status,
+      requested_by: r.requested_by,
+      requested_at: r.requested_at,
+      resolved_by: r.resolved_by || null,
+      resolved_at: r.resolved_at || null,
+      resolve_reason: r.resolve_reason || null,
+      event_id: r.event_id || null,
+    })),
+    active_faults: impact.faults.map((f) => ({
+      fault_id: f.id,
+      cue_id: f.cue_id,
+      label: f.label,
+      reported_by: f.reported_by,
+      reason: f.reason,
+      reported_at: f.reported_at,
+      affected_labels: f.affected_labels,
+    })),
+    pending_cues,
+  };
+}
+
+/**
+ * 签收核对：把快照与当前最新状态逐项比对，返回差异清单（现场交接期间操作照常，差异即变化项）。
+ * 分五组：最新流水位置、有效结果、待复核申请、未解除故障、尚未完成提示（含阻塞原因）。
+ * 须在 BEGIN IMMEDIATE 事务内调用；纯读，不改变任何数据。
+ */
+function diffHandoverSnapshot(perf, snap) {
+  const cues = getVersionCues(perf.version_id);
+  const latestByCue = latestEventsByCue(perf.id);
+  const currentMaxId = latestByCue.size ? Math.max(...[...latestByCue.values()].map((e) => e.id)) : null;
+
+  const groups = {
+    event_position: [],
+    cue_results: [],
+    review_requests: [],
+    active_faults: [],
+    pending_cues: [],
+  };
+
+  // 1) 最新流水位置（任何新增 / 撤回流水都会改变）
+  if (!snap || snap.latest_event_id !== currentMaxId) {
+    groups.event_position.push({
+      field: 'latest_event_id',
+      snapshot: snap ? snap.latest_event_id : null,
+      current: currentMaxId,
+      message: `最新流水位置已变化：快照固定为第 ${snap ? snap.latest_event_id : '-'} 条，当前为第 ${currentMaxId || 0} 条`,
+    });
+  }
+
+  if (snap) {
+    // 2) 各提示有效结果（fired / skipped / 无结果）
+    const snapResultByLabel = new Map((snap.cue_results || []).map((r) => [r.label, r]));
+    for (const c of cues) {
+      const snapR = snapResultByLabel.get(c.label);
+      const cur = cueEffectiveSummary(latestByCue, c.id);
+      const snapAction = snapR ? snapR.status : null;
+      const curAction = cur ? cur.action : null;
+      if (snapAction !== curAction) {
+        groups.cue_results.push({
+          label: c.label,
+          snapshot: snapAction
+            ? { action: snapAction, operator: snapR.operator, created_at: snapR.created_at }
+            : null,
+          current: cur,
+          message: `提示「${c.label}」有效结果已变化：${snapAction ? ACTION_TEXT[snapAction] : '未完成'} → ${curAction ? ACTION_TEXT[curAction] : '未完成'}`,
+        });
+      }
+    }
+
+    // 3) 待复核申请：快照中的申请若已处置 / 消失，或出现新的待复核申请
+    const curReqs = db.prepare(`
+      SELECT r.*, c.label AS label FROM cue_review_requests r
+      JOIN cues c ON c.id = r.cue_id
+      WHERE r.performance_id = ? ORDER BY r.id
+    `).all(perf.id);
+    const curReqById = new Map(curReqs.map((r) => [r.id, r]));
+    for (const sr of snap.pending_requests || []) {
+      const cur = curReqById.get(sr.request_id);
+      if (!cur || cur.status !== sr.status) {
+        groups.review_requests.push({
+          request_id: sr.request_id,
+          label: sr.label,
+          kind: cur && cur.status !== sr.status ? 'changed' : 'missing',
+          snapshot: { status: sr.status, requested_by: sr.requested_by },
+          current: cur ? { status: cur.status, resolved_by: cur.resolved_by } : null,
+          message: cur && cur.status !== sr.status
+            ? `提示「${sr.label}」的复核申请已${REQUEST_STATUS_TEXT[cur.status]}（处置人 ${cur.resolved_by || '-'}）`
+            : `提示「${sr.label}」的复核申请记录已不存在`,
+        });
+      }
+    }
+    const snapReqIds = new Set((snap.pending_requests || []).map((r) => r.request_id));
+    for (const r of curReqs) {
+      if (!snapReqIds.has(r.id)) {
+        groups.review_requests.push({
+          request_id: r.id,
+          label: r.label,
+          kind: 'new',
+          snapshot: null,
+          current: { status: r.status, requested_by: r.requested_by },
+          message: `出现新的复核申请：提示「${r.label}」（申请人 ${r.requested_by}，${REQUEST_STATUS_TEXT[r.status]}）`,
+        });
+      }
+    }
+
+    // 4) 未解除故障：快照中的故障若已解除 / 消失，或登记了新故障（影响范围一并给出）
+    const impactNow = faultImpact(cues, activeFaultRows(perf.id));
+    const curFaultById = new Map(impactNow.faults.map((f) => [f.id, f]));
+    for (const sf of snap.active_faults || []) {
+      if (!curFaultById.has(sf.fault_id)) {
+        groups.active_faults.push({
+          fault_id: sf.fault_id,
+          label: sf.label,
+          kind: 'resolved',
+          snapshot: { reported_by: sf.reported_by, reason: sf.reason },
+          current: null,
+          message: `故障已解除：提示「${sf.label}」（登记人 ${sf.reported_by}：${sf.reason}）`,
+        });
+      }
+    }
+    const snapFaultIds = new Set((snap.active_faults || []).map((f) => f.fault_id));
+    for (const f of impactNow.faults) {
+      if (!snapFaultIds.has(f.id)) {
+        groups.active_faults.push({
+          fault_id: f.id,
+          label: f.label,
+          kind: 'new',
+          snapshot: null,
+          current: { reported_by: f.reported_by, reason: f.reason, affected_labels: f.affected_labels },
+          message: `登记了新故障：提示「${f.label}」（登记人 ${f.reported_by}：${f.reason}），影响 ${f.affected_labels.join('、')}`,
+        });
+      }
+    }
+
+    // 5) 尚未完成提示及阻塞原因：以"快照时未完成、当前仍未完成"的提示比对阻塞原因；
+    //    新出现 / 已完成的未完成提示已由有效结果差异（cue_results）反映。
+    const currentNow = buildHandoverSnapshot(perf);
+    const curPendingByLabel = new Map(currentNow.pending_cues.map((p) => [p.label, p]));
+    for (const sp of snap.pending_cues || []) {
+      const cp = curPendingByLabel.get(sp.label);
+      if (!cp) continue; // 当前已完成 → 已由 cue_results 差异覆盖
+      const a = sp.reason_codes.join(',');
+      const b = cp.reason_codes.join(',');
+      if (a !== b) {
+        groups.pending_cues.push({
+          label: sp.label,
+          snapshot: { reason_codes: sp.reason_codes, reason_text: sp.reason_text },
+          current: { reason_codes: cp.reason_codes, reason_text: cp.reason_text },
+          message: `未完成提示「${sp.label}」阻塞原因已变化：${sp.reason_text} → ${cp.reason_text}`,
+        });
+      }
+    }
+  }
+
+  const diff_count = Object.values(groups).reduce((n, arr) => n + arr.length, 0);
+  return { matched: diff_count === 0, diff_count, groups };
+}
+
+/** 交接单序列化（snapshot 解析为对象；待签收单可附最新差异 live_diff） */
+function presentHandover(row, liveDiff) {
+  const snap = parseSnapshot(row);
+  return {
+    id: row.id,
+    performance_id: row.performance_id,
+    status: row.status,
+    status_text: HANDOVER_STATUS_TEXT[row.status] || row.status,
+    handed_by: row.handed_by,
+    received_by: row.received_by,
+    note: row.note,
+    created_at: row.created_at,
+    signed_at: row.signed_at || null,
+    superseded_at: row.superseded_at || null,
+    superseded_by_handover_id: row.superseded_by_handover_id || null,
+    snapshot: snap,
+    ...(liveDiff ? { live_diff: liveDiff } : {}),
+  };
+}
+
+/** 解析并校验交班人 / 接班人：非空且不同（截断长度与既有操作人一致） */
+function parseHandoverPeople(body) {
+  const handedBy = String(body.handed_by || '').trim().slice(0, 50);
+  const receivedBy = String(body.received_by || '').trim().slice(0, 50);
+  if (!handedBy) throw new HttpError(400, '请填写交班人');
+  if (!receivedBy) throw new HttpError(400, '请填写接班人');
+  if (handedBy === receivedBy) throw new HttpError(400, '交班人与接班人不能为同一人');
+  return { handedBy, receivedBy };
+}
+
+/**
+ * 提交 / 重提交接单：
+ *  - 仅当前可操作（active）演出可提交；只读（已接续）演出 409
+ *  - 交班人 / 接班人非空且不同，否则 400
+ *  - 同一演出只保留一张待签收单：已有待签收单时，须由原交班人用同一姓名重提，
+ *    旧单置为 superseded（保留留痕）并写入新快照；非原交班人重提 409。
+ * 交接期间现场操作照常：本接口只固定快照，不冻结任何现场操作。
+ */
+function submitHandover(performanceId, handedBy, receivedBy, note) {
+  return withTx(() => {
+    const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(performanceId);
+    if (!perf) throw new HttpError(404, '演出不存在');
+    assertActiveInTx(perf);
+
+    const existing = pendingHandoverRow(performanceId);
+    if (existing && existing.handed_by !== handedBy) {
+      throw new HttpError(
+        409,
+        `该演出已有待签收交接单（交班人 ${existing.handed_by}，提交时间 ${existing.created_at}），只能由原交班人重提以替换快照`,
+        { handover: presentHandover(existing, null) }
+      );
+    }
+
+    const snapshot = buildHandoverSnapshot(perf);
+    let newId;
+    if (existing) {
+      // 原交班人重提：旧待签收单标记为已被替换（不可变留痕），再写入新单；
+      // 部分唯一索引保证同一演出至多一张 pending
+      db.prepare(`
+        UPDATE cue_handovers SET status = 'superseded',
+          superseded_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id = ?
+      `).run(existing.id);
+      const info = db.prepare(`
+        INSERT INTO cue_handovers (performance_id, status, handed_by, received_by, note, snapshot)
+        VALUES (?, 'pending', ?, ?, ?, ?)
+      `).run(performanceId, handedBy, receivedBy, note, JSON.stringify(snapshot));
+      newId = Number(info.lastInsertRowid);
+      db.prepare('UPDATE cue_handovers SET superseded_by_handover_id = ? WHERE id = ?').run(newId, existing.id);
+    } else {
+      const info = db.prepare(`
+        INSERT INTO cue_handovers (performance_id, status, handed_by, received_by, note, snapshot)
+        VALUES (?, 'pending', ?, ?, ?, ?)
+      `).run(performanceId, handedBy, receivedBy, note, JSON.stringify(snapshot));
+      newId = Number(info.lastInsertRowid);
+    }
+
+    const row = db.prepare('SELECT * FROM cue_handovers WHERE id = ?').get(newId);
+    return {
+      handover: presentHandover(row, { matched: true, diff_count: 0, groups: emptyDiffGroups() }),
+      replaced_handover_id: existing ? existing.id : null,
+    };
+  });
+}
+
+function emptyDiffGroups() {
+  return { event_position: [], cue_results: [], review_requests: [], active_faults: [], pending_cues: [] };
+}
+
+/**
+ * 接班人签收：事务内按最新状态逐项核对——
+ *  - 交班人本人或其他人签收 → 409（只有接班人本人可签收）
+ *  - 重复签收（已无待签收单）→ 409
+ *  - 任一快照内容已变化 → 409 返回差异（groups/diffs），交接单保持待签收，交班人可据此重提
+ *  - 全部一致 → 置为 signed（记录签收时间），成为不可变历史；之后该演出可再次发起新一轮交接
+ */
+function signHandover(performanceId, operator) {
+  return withTx(() => {
+    const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(performanceId);
+    if (!perf) throw new HttpError(404, '演出不存在');
+
+    const row = pendingHandoverRow(performanceId);
+    // 只读（已接续）演出：待签收单在接续时已自动作废，提交 / 重提 / 签收一律拒绝
+    if (perf.status === 'readonly') {
+      assertActiveInTx(perf); // 抛出统一的只读错误（附接续演出位置）
+    }
+    if (!row) {
+      const last = db.prepare('SELECT * FROM cue_handovers WHERE performance_id = ? ORDER BY id DESC LIMIT 1').get(performanceId);
+      if (last && last.status === 'signed') {
+        throw new HttpError(
+          409,
+          `该演出的交接单已签收（接班人 ${last.received_by}，签收时间 ${last.signed_at}），请勿重复签收；如需再次换班请重新发起交接`,
+          { handover: presentHandover(last, null) }
+        );
+      }
+      if (last && last.status === 'superseded') {
+        throw new HttpError(409, '该演出的待签收交接单已被重提替换，无待签收交接单可签收');
+      }
+      throw new HttpError(409, '该演出当前没有待签收交接单');
+    }
+
+    if (operator !== row.received_by) {
+      throw new HttpError(
+        409,
+        operator === row.handed_by
+          ? `交班人本人不能签收交接单：签收人须为接班人 ${row.received_by}`
+          : `只有接班人 ${row.received_by} 本人可以签收该交接单（当前签收人：${operator}）`,
+        { handover: presentHandover(row, null), expected_received_by: row.received_by }
+      );
+    }
+
+    const snap = parseSnapshot(row);
+    const diff = diffHandoverSnapshot(perf, snap);
+    if (!diff.matched) {
+      throw new HttpError(
+        409,
+        `交接单核对未通过：自 ${row.created_at} 提交以来现场已有 ${diff.diff_count} 项与快照不一致，交接单保持待签收；请逐项核对差异，由交班人 ${row.handed_by} 重提替换快照后再签收`,
+        {
+          handover: presentHandover(row, diff),
+          matched: false,
+          diff_count: diff.diff_count,
+          groups: diff.groups,
+          diffs: flattenDiffs(diff.groups),
+        }
+      );
+    }
+
+    db.prepare(`
+      UPDATE cue_handovers SET status = 'signed',
+        signed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id = ?
+    `).run(row.id);
+    const signed = db.prepare('SELECT * FROM cue_handovers WHERE id = ?').get(row.id);
+    return { handover: presentHandover(signed, { matched: true, diff_count: 0, groups: emptyDiffGroups() }) };
+  });
+}
+
+/** 把分组差异打平为统一清单（执行台表格展示用） */
+function flattenDiffs(groups) {
+  const meta = [
+    ['event_position', '最新流水位置'],
+    ['cue_results', '有效结果'],
+    ['review_requests', '复核申请'],
+    ['active_faults', '未解除故障'],
+    ['pending_cues', '未完成提示'],
+  ];
+  const diffs = [];
+  for (const [key, section] of meta) {
+    for (const item of groups[key]) {
+      diffs.push({ section: key, section_text: section, ...item });
+    }
+  }
+  return diffs;
+}
+
+route('POST', '/api/performances/:id/handover', (body, p) => {
+  const { handedBy, receivedBy } = parseHandoverPeople(body);
+  const note = String(body.note != null ? body.note : '').trim().slice(0, 500);
+  return submitHandover(Number(p.id), handedBy, receivedBy, note);
+});
+
+route('POST', '/api/performances/:id/handover/sign', (body, p) => {
+  const operator = String(body.operator || '').trim().slice(0, 50);
+  if (!operator) throw new HttpError(400, '请填写签收人');
+  return signHandover(Number(p.id), operator);
+});
+
+/** 签收前只读核对（不改数据）：返回待签收单与当前差异，便于执行台展示 / 调用方预检查 */
+route('POST', '/api/performances/:id/handover/check', (body, p) => {
+  const perfId = Number(p.id);
+  const perf = db.prepare('SELECT * FROM performances WHERE id = ?').get(perfId);
+  if (!perf) throw new HttpError(404, '演出不存在');
+  return withTx(() => {
+    const fresh = db.prepare('SELECT * FROM performances WHERE id = ?').get(perfId);
+    const row = pendingHandoverRow(perfId);
+    if (!row) {
+      throw new HttpError(409, '该演出当前没有待签收交接单', { readonly: fresh.status === 'readonly' });
+    }
+    const diff = diffHandoverSnapshot(fresh, parseSnapshot(row));
+    return {
+      handover: presentHandover(row, diff),
+      matched: diff.matched,
+      diff_count: diff.diff_count,
+      groups: diff.groups,
+      diffs: flattenDiffs(diff.groups),
+    };
+  });
 });
 
 /* ---- 现场成组处置（逐项预览 + 整组提交；与单项 / 接续同一 BEGIN IMMEDIATE 串行判定） ---- */

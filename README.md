@@ -17,6 +17,7 @@
 - **改用修订执行单（接续演出）**：现场需改用新版本时，舞台监督指定当前演出、同场次更高且已发布的目标版本与非空操作人，先按编号核对（原演出及其接续来源中有任意触发 / 跳过 / 撤回流水、复核申请或承接结果的编号都会列出并标记），再生成接续演出。原演出仍绑定原快照并转为只读；新版中这些编号的类型、描述、前置编号集合、复核标记均须保留且不存在待处理复核申请，否则按编号返回冲突原因，原演出保持可操作、不产生接续记录。接续演出继承有效结果（标注「承接」及来源演出 / 来源流水，保留原操作人与时间，非再次触发），原流水仍可在原演出查看，未执行提示按新版依赖重算待执行 / 受阻；接续与现场操作串行判定，已只读演出拒绝后续操作，多次接续只能从当前可操作演出发起
   - **成组连续处置**：现场需按顺序连续处置多条提示时，舞台监督在当前**可操作演出**中一次性选择不同编号、逐项指定**触发 / 跳过 / 撤回**，填写本组操作人及各项跳过 / 撤回原因；空清单或重复编号直接拒绝。执行台先展示**逐项预览**（每一步基于前面步骤产生的有效结果判定前置满足、下游撤回保护与待复核限制）与失败原因；**需双人复核的提示不得在成组中直接触发**（请走单项申请—确认）。提交瞬间在事务内按最新状态**重新逐项判定**，任一项失败都指出序号、编号与原因且**整组不产生流水**，全部通过才依次留下与单项操作一致的执行流水并返回各项结果；只读演出拒绝预览与提交，成组提交与接续、单项操作、故障处置在同一事务级串行，现有单项接口与响应保持兼容
 - **现场设备故障登记与解除**：舞台监督在当前可操作演出按提示编号登记故障（操作人 + 原因）；编号不属于该演出、信息为空或该编号已有未解除故障时拒绝。系统沿已发布执行单的前置关系标出故障提示及所有依赖它的后续提示；未解除期间受影响提示**不得触发**（单项触发、双人复核确认、成组预览与提交均按最新故障状态判 422），**待复核申请保留但不得确认**，跳过与撤回仍遵守原有规则；登记不改写任何既有执行流水。解除须记录操作人与原因，解除后按当前有效结果重算提示状态。故障登记 / 解除与现场操作、接续串行判定：接续前有未解除故障则拒绝且原演出保持可操作，已接续的只读演出不得登记或解除；执行台展示故障影响范围与登记 / 解除处理记录
+- **现场换班交接（交接单）**：舞台监督在**当前可操作演出**填写交班人、接班人（均非空且不能相同）与交接说明，生成一张**待签收交接单**；同一演出只保留一张待签收单（部分唯一索引保证）。交接单**固定当时快照**：各提示有效结果、最新流水位置、待复核申请、未解除故障（含影响范围），并列出尚未完成的提示及阻塞原因（前置未触发 / 待复核 / 故障冻结 / 待执行）。**交接期间现场操作照常进行**，不冻结任何操作；接班人签收时系统按最新状态**逐项核对**，任一快照内容已变化即返回分组差异、交接单保持待签收，交班人可据此**重提替换快照**（旧单标记「已被重提替换」并留痕，重提人须为原交班人）；全部一致才签收，签收记录不可变。交班人本人或其他人签收、重复签收均拒绝；接续后的只读演出只可回看交接单，不能提交、重提或签收（接续时未签收单自动作废留痕）。交接写操作与现场操作、复核、故障处置、接续在同一 `BEGIN IMMEDIATE` 事务内串行判定，执行台展示交接单快照与实时差异
 - **明确错误**：无已发布版本、非法依赖、前置未满足、缺少操作人 / 原因等均有中文错误提示
 
 ## 一键启动（Docker Compose）
@@ -59,6 +60,7 @@ npm start          # 或 node server.js
    - **现场设备故障**：点提示卡片上的「⚠ 登记故障」或顶部「⚠ 现场设备故障」面板，按编号填写原因登记；面板展示影响范围（故障源 + 全部下游）与处理记录。故障未解除时受影响提示的触发按钮与待复核「确认触发」按钮冻结（跳过 / 撤回照常）；设备恢复后在面板点「解除故障」并填写处理人 / 原因，提示状态立即按当前有效结果重算，全过程不改写既有流水
 6. 排演中要改执行单：新建草稿（自动复制最新版本，含复核标记）→ 修改 → 发布为 v2；新演出即可选 v2，旧演出仍按 v1 回看
 7. **现场需改用新版**：进入当前演出执行台，点「改用修订执行单 → 发起接续」，选择更高的已发布版本、填写操作人，先「按编号核对」查看有痕迹编号（触发 / 跳过 / 撤回 / 复核 / 承接）与冲突，通过后「生成接续演出」。原演出立即只读（顶部横幅可跳到接续演出），接续演出继承有效结果并标注「承接」；需要再次修订时，只能从最新的接续演出发起下一次接续
+8. **现场换班**：执行台顶部「🔁 现场换班交接」面板填写交班人、接班人（须不同）与交接说明后「提交交接单」，面板即展示固定快照（各提示结果、最新流水位置、待复核申请、未解除故障、未完成提示及阻塞原因）；交接期间现场照常操作，页面 2.5 秒轮询会实时标出与快照的**差异**。接班人在面板填本人姓名点「逐项核对无误，签收」：有差异会被拒绝并列出差异，交班人点「交班人重提」即可用最新快照替换旧单（旧单留痕）；核对一致才签收，签收单进入下方不可变「交接历史」。只读（已接续）演出只可回看交接单
 
 ## 技术栈与结构
 
@@ -88,13 +90,16 @@ docker-compose.yml   # 一键启动 + 数据卷
 | POST | `/api/versions/:id/validate` | 校验（缺失引用 / 循环依赖） |
 | POST | `/api/versions/:id/publish` | 发布（校验失败 422 并附问题清单） |
 | POST | `/api/shows/:id/performances` | 启动演出（无已发布版本返回 400） |
-| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`pending_request` 与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`；承接流水 `source:"carried"`） |
+| GET | `/api/performances/:id` | 执行台状态（提示状态 + 事件流水 + 复核申请 + **设备故障** + **交接单**；附 `continuation` 接续关系与 `continue_targets` 可接续目标版本；各提示附 `needs_review`、`pending_request` 与故障字段 `fault_blocked` / `fault_blocked_labels` / `own_fault`；顶层附 `faults` 全部登记解除记录（含 `affected_labels`）与 `active_fault_count`；承接流水 `source:"carried"`；附当前待签收单 `handover`（含固定 `snapshot` 与按最新状态实时计算的 `live_diff`）及全部 `handover_history` 交接历史（`pending` / `signed` / `superseded`）） |
 | POST | `/api/performances/:id/continue/preview` | **接续前按编号核对**（不改数据）：返回有痕迹编号及标记 `hints`、冲突清单 `conflicts`、待处理申请 `pending_requests`、拟承接结果 `carried` 与 `can_continue` |
 | POST | `/api/performances/:id/continue` | **生成接续演出**（body：`version_id` 目标版本、`operator` 必填、`name` 可选）。成功返回新演出与承接清单；冲突 409 附编号与原因；只读演出 / 非更高或未发布目标 4xx |
 | POST | `/api/performances/:id/batch/preview` | **成组连续处置·逐项预览**（不改数据）：body `{operator, items:[{label,action,reason}]}`，`action` 为 `fire/skip/retract`。返回逐项判定 `results`、成功/失败计数与 `can_submit`；空清单、重复编号、非法动作 400；只读演出 409 |
 | POST | `/api/performances/:id/batch` | **成组连续处置·整组提交**：事务内按最新状态重新逐项判定，全部通过才依次写入与单项一致的流水并返回各项结果；任一项失败回滚、**整组不产生流水**，4xx 附逐项 `results`（含序号、编号、原因）；只读演出 409。**受未解除设备故障影响的编号触发判 422（附 `blocked_by_faults`），跳过 / 撤回不受故障影响** |
 | POST | `/api/performances/:id/cues/:cueId/faults` | **登记现场设备故障**（body：`operator`、`reason` 必填）：编号不属于该演出 404；信息为空 400；该编号已有未解除故障 409；只读演出 409。返回 `fault`（含沿前置关系计算的 `affected_labels`：故障编号本身及全部依赖它的后续提示）；不改写任何既有执行流水 |
 | POST | `/api/performances/:id/faults/:faultId/resolve` | **解除故障**（body：`operator`、`reason` 必填）：不存在 404；已解除 409；只读演出 409。解除后按当前有效结果重算提示状态（无新增 / 改写流水），返回剩余未解除故障与仍受影响编号 |
+| POST | `/api/performances/:id/handover` | **提交 / 重提交接单**（body：`handed_by` 交班人、`received_by` 接班人、`note` 交接说明可选）：两人非空且不同，否则 400；只读演出 409。同一演出只保留一张待签收单：已有待签收单时须由**原交班人**重提（旧单置 `superseded` 留痕、替换为新快照），非原交班人 409。返回 `handover`（含 `snapshot` 快照与 `live_diff`）与 `replaced_handover_id` |
+| POST | `/api/performances/:id/handover/check` | **签收前只读核对**（不改数据）：返回待签收交接单、`matched`、`diff_count`、分组差异 `groups` 与打平清单 `diffs`；无待签收单 409 |
+| POST | `/api/performances/:id/handover/sign` | **接班人签收**（body：`operator` 必填，须为接班人本人）：交班人本人或其他人签收 409；重复签收 409；只读演出 409；快照后现场有任何变化则 409 返回 `groups` / `diffs` 差异且交接单保持待签收；全部一致才置 `signed`（记录 `signed_at`，不可变历史） |
 | POST | `/api/performances/:id/cues/:cueId/fire` | 触发（前置未满足 422；**受未解除设备故障影响 422 附 `blocked_by_faults`**；已有结果 409 附当前状态；只读演出 409）。**需复核提示调用本接口不会直接触发**，而是登记复核申请并返回 `{ request }`（申请阶段不受故障限制，确认时才判定）；普通提示响应保持 `{ event }` |
 | POST | `/api/performances/:id/cues/:cueId/skip` | 跳过（缺原因 400；已有结果 409；待复核期间 409；只读演出 409） |
 | POST | `/api/performances/:id/cues/:cueId/retract` | 撤回已触发（缺撤回人/原因 400；非已触发 409；下游仍已触发 409 附 `affected` 编号列表；待复核期间 409；只读演出 409） |
@@ -449,15 +454,143 @@ curl http://localhost:3000/api/performances/2
 # 10) 只读（已接续）演出：登记 / 解除统一 409（附 readonly 与接续演出位置）
 ```
 
+## 现场换班交接（本轮新增）
+
+现场换班时，舞台监督在**当前可操作演出**填写交班人、接班人与交接说明，生成一张**待签收交接单**；交接期间现场操作照常进行，接班人按最新状态逐项核对无误后签收，签收记录成为不可变历史。
+
+**规则**
+
+- 交班人、接班人均必填且**不能为同一人**（400）；交接说明可选。仅当前**可操作（active）**演出可提交，只读（已接续）演出 409
+- **同一演出只保留一张待签收单**（数据库部分唯一索引 `WHERE status='pending'` 保证）；再次提交时：
+  - 须由**原交班人**用同一姓名重提——旧单置为 `superseded`（标记替换时间、指向新单，全量留痕），同时写入以当前状态固定的**新快照**；
+  - 非原交班人重提返回 409（附当前待签收单）。
+- **快照固定内容**（提交 / 重提瞬间在写事务内读取）：
+  - 各提示当前有效结果（已触发 / 已跳过 / 未完成）与对应操作人、时间；
+  - **最新流水位置**（`cue_events` 最大 id）；
+  - 全部**待复核申请**（含已处置状态，另列待处理明细）；
+  - **未解除故障**（登记人、原因、沿前置关系计算的影响范围）；
+  - **尚未完成的提示**及阻塞原因：`blocked`（前置未触发，附未满足编号）、`review_pending`（待复核申请未处置）、`own_fault`（本提示故障）、`fault_blocked`（受其他故障影响触发冻结）、`pending`（待执行）。
+- **交接期间现场操作照常**：交接单不冻结触发 / 跳过 / 撤回 / 复核 / 成组 / 故障 / 接续等任何接口。
+- **签收核对**：接班人签收时在 `BEGIN IMMEDIATE` 事务内按最新状态**逐项比对**快照，差异分五组返回——
+  1. `event_position` 最新流水位置变化（交接后新增了任意流水）；
+  2. `cue_results` 某提示有效结果变化（未完成→已触发 / 已跳过、已触发被撤回等）；
+  3. `review_requests` 快照中的申请已确认 / 撤销 / 驳回，或出现新申请；
+  4. `active_faults` 快照中的故障已解除，或登记了新故障；
+  5. `pending_cues` 尚未完成提示的**阻塞原因**变化（如前置补齐、故障解除、新增待复核）。
+
+  任一差异存在即返回 **409** 与 `groups`（分组）/ `diffs`（打平清单），**交接单保持待签收**，交班人可据此重提替换快照；差异为 0 才签收成功（`signed`，记录 `signed_at`），签收后不可再修改，成为不可变历史；签收完成后同一演出可发起**新一轮**交接。
+- **签收人身份**：只有接班人本人可签收；交班人本人签收、其他人签收均 409；对已签收单重复签收 409（提示如需再次换班请重新发起）。
+- **与接续的关系**：接续成功时原演出的待签收交接单随原演出一并**自动作废**（置 `superseded` 留痕）；接续后的只读演出只能回看交接单及其快照，**不能提交、重提或签收**；接续演出是新的演出，交接历史不跨演出继承。
+- 交接提交、重提、签收与现场操作、复核处置、故障登记 / 解除、接续都在同一事务级**串行判定**；既有接口路径、请求体与响应结构保持兼容（GET 仅新增 `handover` / `handover_history` 字段）。
+
+**调用示例**（假设演出 id=1；演示数据中 L1 已触发、S1 已跳过）：
+
+```bash
+# 1) 交班人提交交接单（两人非空且不同；快照当场固定）
+curl -X POST http://localhost:3000/api/performances/1/handover \
+  -H 'Content-Type: application/json' \
+  -d '{"handed_by":"张三","received_by":"李四","note":"开场段完成，B1 前置 S1 已跳过，注意 B2 需双人复核"}'
+# → 200
+# {
+#   "replaced_handover_id": null,
+#   "handover": {
+#     "id": 1, "status": "pending", "handed_by": "张三", "received_by": "李四",
+#     "note": "…", "created_at": "…",
+#     "snapshot": {
+#       "latest_event_id": 2,
+#       "cue_results": [
+#         {"label":"L1","status":"fired","operator":"张三", ...},
+#         {"label":"S1","status":"skipped","operator":"李四", ...},
+#         {"label":"B1","status":null, ...}, ...
+#       ],
+#       "pending_requests": [],
+#       "active_faults": [],
+#       "pending_cues": [
+#         {"label":"B1","reason_codes":["blocked"],
+#          "reason_text":"受阻：前置未触发（S1）"},
+#         {"label":"L2","reason_codes":["pending"],"reason_text":"待执行"},
+#         {"label":"B2","reason_codes":["blocked"],
+#          "reason_text":"受阻：前置未触发（B1、L2）"}
+#       ]
+#     },
+#     "live_diff": {"matched": true, "diff_count": 0, "groups": {…5 组…}}
+#   }
+# }
+
+# 2) 参数校验
+curl -X POST http://localhost:3000/api/performances/1/handover \
+  -H 'Content-Type: application/json' -d '{"handed_by":"张三","received_by":"张三"}'
+# → 400 {"error":"交班人与接班人不能为同一人"}
+
+# 3) 交接期间现场照常操作（例如触发 L2）
+curl -X POST http://localhost:3000/api/performances/1/cues/4/fire \
+  -H 'Content-Type: application/json' -d '{"operator":"赵六"}'
+# → 200 {"event":{…}}   交接单不冻结现场
+
+# 4) 接班人签收前可先只读核对（也可直接签收，服务端同样会核对）
+curl -X POST http://localhost:3000/api/performances/1/handover/check \
+  -H 'Content-Type: application/json' -d '{}'
+# → 200 {"matched": false, "diff_count": 2,
+#        "groups": {"event_position":[{"message":"最新流水位置已变化：快照固定为第 2 条，当前为第 3 条", …}],
+#                   "cue_results":[{"label":"L2","message":"提示「L2」有效结果已变化：未完成 → 已触发", …}],
+#                   "review_requests": [], "active_faults": [], "pending_cues": []},
+#        "diffs": [ {"section":"event_position", …}, {"section":"cue_results", …} ]}
+
+# 5) 交班人本人 / 其他人签收 → 拒绝
+curl -X POST http://localhost:3000/api/performances/1/handover/sign \
+  -H 'Content-Type: application/json' -d '{"operator":"张三"}'
+# → 409 {"error":"交班人本人不能签收交接单：签收人须为接班人 李四", "expected_received_by":"李四"}
+
+# 6) 接班人在有差异时签收 → 409 返回差异，交接单保持待签收
+curl -X POST http://localhost:3000/api/performances/1/handover/sign \
+  -H 'Content-Type: application/json' -d '{"operator":"李四"}'
+# → 409
+# {"error":"交接单核对未通过：自 … 提交以来现场已有 2 项与快照不一致，交接单保持待签收；请逐项核对差异，由交班人 张三 重提替换快照后再签收",
+#  "matched": false, "diff_count": 2, "groups": {…}, "diffs": [ … ], "handover": { …保持 pending… }}
+
+# 7) 交班人据此重提（必须为原交班人；旧单作废留痕、替换为新快照；接班人 / 说明可调整）
+curl -X POST http://localhost:3000/api/performances/1/handover \
+  -H 'Content-Type: application/json' \
+  -d '{"handed_by":"张三","received_by":"李四","note":"更新：L2 已由赵六触发，目前待办 B1、S2、B2"}'
+# → 200 {"replaced_handover_id": 1, "handover": {"id": 2, "status":"pending", …新快照 live_diff.matched=true…}}
+
+# 非原交班人重提：
+# → 409 {"error":"该演出已有待签收交接单（交班人 张三，提交时间 …），只能由原交班人重提以替换快照"}
+
+# 8) 现场无变化，接班人本人签收 → 成功，不可变历史
+curl -X POST http://localhost:3000/api/performances/1/handover/sign \
+  -H 'Content-Type: application/json' -d '{"operator":"李四"}'
+# → 200 {"handover": {"id": 2, "status": "signed", "signed_at": "…",
+#                     "live_diff": {"matched": true, "diff_count": 0, …}}}
+
+# 9) 重复签收 → 409；签收后可再发起新一轮交接（POST /handover 生成新待签收单）
+# → 409 {"error":"该演出的交接单已签收（接班人 李四，签收时间 …），请勿重复签收；如需再次换班请重新发起交接"}
+
+# 10) 执行台状态：当前待签收单（含快照与实时差异）+ 全部交接历史
+curl http://localhost:3000/api/performances/1
+# {
+#   "handover": { …当前待签收单，含 snapshot 与 live_diff… } 或 null,
+#   "handover_history": [
+#     {"id":3,"status":"pending",  "handed_by":"李四","received_by":"钱七", …},
+#     {"id":2,"status":"signed",   "handed_by":"张三","received_by":"李四","signed_at":"…"},
+#     {"id":1,"status":"superseded","handed_by":"张三","received_by":"李四",
+#      "superseded_at":"…","superseded_by_handover_id":2}
+#   ]
+# }
+```
+
+**接续后的只读演出**：待签收单在接续事务内自动置 `superseded`；对其调用提交 / 重提 / 签收统一 409（提交 / 重提返回既有只读错误并附接续演出位置，签收返回只读提示），交接单与快照在该演出中永久可回看。
+
 ## 数据与并发说明
 
 - `cue_events` 为**流水表**：触发 / 跳过 / 撤回逐条追加，全量留痕；同一演出同一提示的「当前有效结果」由最新一条事件推导（`retracted` 表示已撤回、当前无有效结果），至多一个当前有效结果。`source` 区分 `manual`（现场操作）与 `carried`（接续时自来源演出承接，附 `carried_from_performance_id` / `carried_from_event_id`，沿用原操作人与时间，非再次触发）
 - `cue_review_requests` 为**复核申请表**：申请（申请人、时间）与处置（确认 / 撤销 / 驳回、处置人、时间、原因、关联的触发流水 `event_id`）全量留痕；`pending → confirmed / cancelled / rejected` 为终态迁移，同一提示至多一条待复核申请
 - `cue_faults` 为**现场设备故障表**：登记（编号、登记人、原因、时间）与解除（解除人、时间、原因）全量留痕，`active → resolved` 终态迁移；部分唯一索引 `WHERE status='active'` 保证同一演出同一提示至多一条未解除故障。故障为独立记录，**不改写任何执行流水**；影响范围（故障编号本身 + 沿前置关系反向可达的全部下游）在读取时按版本依赖实时计算，解除后自然消失，提示状态按当前有效结果重算
+- `cue_handovers` 为**现场换班交接表**：提交（交班人、接班人、说明、固定快照 JSON、时间）、签收（`signed_at`）、重提替换（`superseded` + `superseded_at` + `superseded_by_handover_id`）全量留痕，状态机 `pending → signed`（签收终态、不可变）或 `pending → superseded`（原交班人重提 / 接续作废旧单）。部分唯一索引 `WHERE status='pending'` 保证**同一演出至多一张待签收单**；快照只在提交 / 重提时写入，签收核对始终实时比对当前状态而不修改快照
 - `performances` 记录接续关系：`status`（`active` 可操作 / `readonly` 已接续只读）、`continued_from_performance_id`（来源演出）、`continued_at/by`（接续时间与操作人）；接续演出绑定目标版本，原演出仍绑定原版本快照
-- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**与**接续**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、接续演出位置）。未解除故障只冻结受影响提示的**触发**（含复核确认），跳过与撤回按原有规则判定；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；成组预览为只读快照判定（Node 单线程同步读，不穿插写操作），不写任何数据
+- 触发、跳过、撤回、复核处置、成组提交、**故障登记 / 解除**、**交接提交 / 重提 / 签收**与**接续**均在 `BEGIN IMMEDIATE` 事务内「读最新事件 / 申请 / 故障 / 交接单 / 演出状态 → 判定 → 写入」，并发操作串行判定，后到的冲突请求收到对应错误与当前状态（操作人、时间、原因、故障清单、交接差异、接续演出位置）。交接单本身**不冻结任何现场操作**：交接期间触发 / 跳过 / 撤回 / 复核 / 成组 / 故障照常，变化只在签收核对时体现为差异。未解除故障只冻结受影响提示的**触发**（含复核确认），跳过与撤回按原有规则判定；成组提交在事务内对整组清单**重新逐项判定**，任一项失败整体回滚（含同组已拟写入项），因此成组提交不可能只落一半流水；成组预览为只读快照判定（Node 单线程同步读，不穿插写操作），不写任何数据
 - 前置是否满足、提示状态（待执行/已触发/已跳过/受阻）均按**当前有效结果**计算：前置被撤回后，未执行的下游提示重新变为受阻；复核确认时同样按当前有效结果判定，前置失效或存在故障则确认拒绝且申请保持待复核；接续后未执行提示一律按**新版依赖**重算（承接的已触发计入满足）
 - 接续前的按编号核对覆盖**整条接续链**（当前演出 + 逐级来源演出）：任一环节有触发 / 跳过 / 撤回流水、复核申请或承接结果的编号都须在新版保留其编号、类型、描述、前置集合与复核标记，且当前无待处理申请，否则整体拒绝并按编号返回原因
-- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），并自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引），全部历史记录保留，无需手工操作
+- 旧版数据库启动时自动迁移：`cue_events` 唯一约束表重建为流水表、`cues` 补 `needs_review` 列（既有提示默认 0，按无需复核处理），`performances` 补 `status / continued_from_performance_id / continued_at / continued_by` 列（既有演出默认 `active`），`cue_events` 补 `source / carried_from_*` 列（既有流水默认 `manual`），并自动新建 `cue_faults` 故障登记表（含 active 部分唯一索引）与 `cue_handovers` 交接单表（含 pending 部分唯一索引），全部历史记录保留，无需手工操作
 - 演出与版本通过外键绑定，版本发布后无更新入口（含 `needs_review` 标记），因此历史回看永远呈现演出当时的执行单内容；接续只新建演出并把原演出置为只读，**不改动任何版本快照**
 - 接续关系可在执行台顶部横幅与场次页演出记录中查看；只读演出仍可随时打开回看其流水、复核申请与当时版本

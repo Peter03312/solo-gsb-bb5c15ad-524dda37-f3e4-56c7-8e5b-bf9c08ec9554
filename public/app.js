@@ -424,7 +424,7 @@ async function renderPerformance(id) {
   } catch (e) { app.innerHTML = `<div class="error-list">${esc(e.message)}</div>`; }
 }
 
-function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount }) {
+function drawPerformance(id, { performance: perf, continuation, continue_targets: targets, cues, events, review_requests: reviewRequests, faults, active_fault_count: activeFaultCount, handover, handover_history: handoverHistory }) {
   // 2.5s 轮询整体重绘：记住当前焦点与光标位置，重绘后恢复，避免输入被打断
   const active = document.activeElement;
   const focusKey = active && (active.dataset.focusKey || (active.id === 'operator-input' ? 'operator' : null));
@@ -468,6 +468,7 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
         <span class="status blocked">受阻 ${counts.blocked}</span>
         ${pendingReqs.length ? `<span class="status review-pending">待复核 ${pendingReqs.length}</span>` : ''}
         ${activeFaults.length ? `<span class="status fault-active">⚠ 故障 ${activeFaults.length} · 冻结 ${blockedByFaultSet.size}</span>` : ''}
+        ${handover ? `<span class="status handover-pending-chip">🔁 交接待签收 · ${esc(handover.received_by)}</span>` : ''}
         <span class="grow"></span>
         <label>操作人 <input id="operator-input" type="text" value="${esc(opVal)}" placeholder="姓名" style="width:110px" ${readonly ? 'disabled' : ''}></label>
         <a href="#/shows/${perf.show_id}">返回场次</a>
@@ -475,6 +476,7 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
     </div>
     ${renderContinuationBanner(perf, continuation, carriedCount)}
     ${readonly ? '' : '<div id="batch-panel-mount"></div>'}
+    <div id="handover-panel-mount"></div>
     <div id="fault-panel-mount"></div>
     ${readonly ? '' : '<div id="continue-panel-mount"></div>'}
     <div class="grid-2">
@@ -544,6 +546,7 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   if (opInput) opInput.onchange = opInput.oninput = () => localStorage.setItem('operator', opInput.value.trim());
 
   // 只读演出仍展示故障影响范围与处理记录（只读形态，无登记 / 解除表单）
+  drawHandoverPanel(id, handover, handoverHistory || [], true);
   if (readonly) {
     drawFaultPanel(id, cues, faultList, activeFaults, true);
     return;
@@ -573,6 +576,7 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
   drawBatchPanel(id, cues);
   drawFaultPanel(id, cues, faultList, activeFaults, readonly);
   drawContinuePanel(id, targets || []);
+  drawHandoverPanel(id, handover, handoverHistory || [], false);
 
   // 恢复焦点（轮询重绘不打断操作人/成组表单输入）
   if (focusKey) {
@@ -586,6 +590,291 @@ function drawPerformance(id, { performance: perf, continuation, continue_targets
       }
     }
   }
+}
+
+/* ---------- 现场换班交接面板 ---------- */
+
+const HANDOVER_STATUS_TEXT = { pending: '待签收', signed: '已签收', superseded: '已被重提替换' };
+const HANDOVER_DIFF_SECTIONS = [
+  ['event_position', '最新流水位置'],
+  ['cue_results', '有效结果'],
+  ['review_requests', '复核申请'],
+  ['active_faults', '未解除故障'],
+  ['pending_cues', '未完成提示'],
+];
+
+// 交接表单状态按演出记忆（轮询重绘不丢失正在填写的交班人 / 接班人 / 说明 / 签收人）
+const handoverUiState = new Map();
+function getHandoverState(perfId) {
+  if (!handoverUiState.has(perfId)) {
+    handoverUiState.set(perfId, { open: true, handedBy: '', receivedBy: '', note: '', signBy: '' });
+  }
+  return handoverUiState.get(perfId);
+}
+
+function drawHandoverPanel(perfId, handover, history, readonly) {
+  const mount = document.getElementById('handover-panel-mount');
+  if (!mount) return;
+  const st = getHandoverState(perfId);
+
+  const body = handover
+    ? renderPendingHandover(perfId, handover, readonly, st)
+    : readonly
+      ? '<p class="muted">只读演出：交接历史可回看，不能提交、重提或签收。</p>'
+      : renderHandoverForm(perfId, st);
+
+  const historyHtml = renderHandoverHistory(handover, history);
+
+  mount.innerHTML = `
+    <div class="panel handover-panel${handover ? ' has-pending' : ''}">
+      <div class="row">
+        <b>🔁 现场换班交接</b>
+        <span class="muted">交班人填写交班人 / 接班人 / 交接说明生成待签收交接单；交接期间现场操作照常，接班人按最新状态逐项核对，无差异方可签收</span>
+        <span class="grow"></span>
+        ${handover ? '<span class="badge handover-badge">待签收</span>' : ''}
+        <button class="ghost small" id="handover-toggle">${st.open ? '收起' : '展开'}</button>
+      </div>
+      ${st.open ? `<div style="margin-top:10px">${body}${historyHtml}</div>` : ''}
+    </div>`;
+
+  document.getElementById('handover-toggle').onclick = () => { st.open = !st.open; drawHandoverPanel(perfId, handover, history, readonly); };
+  if (!st.open || readonly) return;
+
+  if (handover) {
+    const signBtn = document.getElementById('handover-sign');
+    if (signBtn) signBtn.onclick = () => doHandoverSign(perfId);
+    const resubmitBtn = document.getElementById('handover-resubmit');
+    if (resubmitBtn) resubmitBtn.onclick = () => doHandoverResubmit(perfId, handover);
+    const refreshBtn = document.getElementById('handover-refresh');
+    if (refreshBtn) refreshBtn.onclick = () => { stopPolling(); renderPerformance(perfId); };
+    const signInput = document.getElementById('handover-sign-by');
+    if (signInput) signInput.oninput = () => { st.signBy = signInput.value; };
+  } else {
+    const hb = document.getElementById('handover-handed-by');
+    const rb = document.getElementById('handover-received-by');
+    const nt = document.getElementById('handover-note');
+    if (hb) hb.oninput = () => { st.handedBy = hb.value; };
+    if (rb) rb.oninput = () => { st.receivedBy = rb.value; };
+    if (nt) nt.oninput = () => { st.note = nt.value; };
+    document.getElementById('handover-submit').onclick = () => doHandoverSubmit(perfId);
+  }
+}
+
+function renderHandoverForm(perfId, st) {
+  const handedVal = st.handedBy || getOperator();
+  return `
+    <div class="handover-form">
+      <div class="row">
+        <label>交班人 <input id="handover-handed-by" type="text" data-focus-key="handover-${perfId}-hb"
+               value="${esc(handedVal)}" placeholder="交班人姓名（必填）" style="width:130px"></label>
+        <label>接班人 <input id="handover-received-by" type="text" data-focus-key="handover-${perfId}-rb"
+               value="${esc(st.receivedBy)}" placeholder="接班人姓名（必填，须与交班人不同）" style="width:180px"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <textarea id="handover-note" rows="2" class="grow" data-focus-key="handover-${perfId}-note"
+          placeholder="交接说明：当前演出进度、注意事项（可选）">${esc(st.note)}</textarea>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="big" id="handover-submit">提交交接单（生成待签收快照）</button>
+        <span class="muted">快照固定：各提示有效结果、最新流水位置、待复核申请、未解除故障、尚未完成提示及阻塞原因</span>
+      </div>
+    </div>`;
+}
+
+function renderPendingHandover(perfId, h, readonly, st) {
+  const snap = h.snapshot || {};
+  const live = h.live_diff || { matched: true, diff_count: 0, groups: {} };
+  const cueResults = snap.cue_results || [];
+  const done = cueResults.filter(c => c.status);
+  const pendingCues = snap.pending_cues || [];
+  const reqs = snap.pending_requests || [];
+  const faults = snap.active_faults || [];
+
+  const diffBanner = readonly ? '' : live.matched
+    ? '<div class="ok-box handover-diff-ok">✓ 与当前最新状态逐项核对一致，接班人可以签收。</div>'
+    : `<div class="error-list handover-diff-bad">
+         <b>⚠ 快照后现场已变化（${live.diff_count} 项差异），暂不能签收；交接单保持待签收，请由交班人重提替换快照：</b>
+         ${renderDiffTable(live.groups)}
+       </div>`;
+
+  const cueTable = `
+    <details class="handover-details">
+      <summary class="muted">提示有效结果（${done.length}/${cueResults.length} 已完成；流水固定到第 ${snap.latest_event_id == null ? '0' : snap.latest_event_id} 条）</summary>
+      <div class="hint-table-wrap"><table class="hint-table">
+        <thead><tr><th>编号</th><th>快照结果</th><th>操作人</th><th>时间</th></tr></thead>
+        <tbody>
+          ${cueResults.map(c => `
+            <tr>
+              <td><b>${esc(c.label)}</b></td>
+              <td>${c.status ? `<span class="status ${c.status}">${ACTION_TEXT(c.status)}</span>` : '<span class="muted">未完成</span>'}</td>
+              <td class="muted">${c.operator ? esc(c.operator) : '—'}</td>
+              <td class="muted">${c.created_at ? fmtTime(c.created_at) : '—'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </details>`;
+
+  const pendingTable = `
+    <details class="handover-details" ${pendingCues.length ? 'open' : ''}>
+      <summary class="muted">尚未完成的提示（${pendingCues.length} 项）及阻塞原因</summary>
+      ${pendingCues.length === 0 ? '<p class="muted">无</p>' : `
+      <div class="hint-table-wrap"><table class="hint-table">
+        <thead><tr><th>编号</th><th>阻塞原因</th></tr></thead>
+        <tbody>
+          ${pendingCues.map(p => `<tr><td><b>${esc(p.label)}</b></td><td>${esc(p.reason_text)}</td></tr>`).join('')}
+        </tbody>
+      </table></div>`}
+    </details>`;
+
+  const reqBlock = `
+    <div class="handover-subblock">
+      <b>待复核申请（${reqs.length}）</b>
+      ${reqs.length === 0 ? '<span class="muted"> 无</span>' : `
+      <ul class="handover-mini-list">
+        ${reqs.map(r => `<li><b>${esc(r.label)}</b> · ${REQUEST_STATUS_TEXT[r.status]} · 申请人 ${esc(r.requested_by)} · ${fmtTime(r.requested_at)}</li>`).join('')}
+      </ul>`}
+    </div>
+    <div class="handover-subblock">
+      <b>未解除故障（${faults.length}）</b>
+      ${faults.length === 0 ? '<span class="muted"> 无</span>' : `
+      <ul class="handover-mini-list">
+        ${faults.map(f => `<li><b>${esc(f.label)}</b> · ${esc(f.reported_by)}：${esc(f.reason)} · 影响 ${(f.affected_labels || []).map(esc).join('、')}</li>`).join('')}
+      </ul>`}
+    </div>`;
+
+  return `
+    <div class="handover-pending">
+      <div class="row" style="font-size:14px">
+        <span class="badge handover-badge">待签收</span>
+        <span>交班人 <b>${esc(h.handed_by)}</b> → 接班人 <b>${esc(h.received_by)}</b></span>
+        <span class="muted">提交于 ${fmtTime(h.created_at)}</span>
+        ${readonly ? '<span class="badge readonly">只读演出</span>' : ''}
+      </div>
+      ${h.note ? `<div class="handover-note">交接说明：${esc(h.note)}</div>` : ''}
+      ${diffBanner}
+      ${cueTable}
+      ${pendingTable}
+      ${reqBlock}
+      ${readonly ? '' : `
+      <div class="row" style="margin-top:10px">
+        <label>签收人 <input id="handover-sign-by" type="text" data-focus-key="handover-${perfId}-sign"
+               value="${esc(st.signBy || '')}" placeholder="接班人本人姓名" style="width:150px"></label>
+        <button class="big" id="handover-sign">逐项核对无误，签收</button>
+        <button class="ghost" id="handover-resubmit">交班人重提（替换快照）</button>
+        <button class="ghost small" id="handover-refresh">立即核对最新状态</button>
+        <span class="muted">仅接班人 ${esc(h.received_by)} 本人可签收；交班人或其他人签收均拒绝</span>
+      </div>`}
+    </div>`;
+}
+
+function renderDiffTable(groups) {
+  const rows = [];
+  for (const [key, sectionText] of HANDOVER_DIFF_SECTIONS) {
+    for (const d of (groups[key] || [])) {
+      rows.push(`<tr><td><span class="hint-flag flag-handover-diff">${esc(sectionText)}</span></td><td>${esc(d.message)}</td></tr>`);
+    }
+  }
+  return `
+    <div class="hint-table-wrap"><table class="hint-table handover-diff-table">
+      <thead><tr><th style="width:110px">差异类型</th><th>差异内容</th></tr></thead>
+      <tbody>${rows.join('')}</tbody>
+    </table></div>`;
+}
+
+function renderHandoverHistory(current, history) {
+  const past = history.filter(h => !(current && h.id === current.id));
+  if (!past.length) return '';
+  return `
+    <details class="handover-details" style="margin-top:10px">
+      <summary class="muted">交接历史（${past.length} 条，已签收不可变 / 重提替换留痕；点击展开回看快照）</summary>
+      <ul class="handover-mini-list">
+        ${past.map(h => {
+          const snap = h.snapshot || {};
+          const cueResults = snap.cue_results || [];
+          const doneCount = cueResults.filter(c => c.status).length;
+          const pendingCues = snap.pending_cues || [];
+          const reqs = snap.pending_requests || [];
+          const faults = snap.active_faults || [];
+          return `
+          <li>
+            <div class="row">
+              <span class="badge handover-${h.status}">${HANDOVER_STATUS_TEXT[h.status] || h.status}</span>
+              <b>#${h.id}</b>
+              ${esc(h.handed_by)} → ${esc(h.received_by)}
+              <span class="muted">提交 ${fmtTime(h.created_at)}${h.signed_at ? ' · 签收 ' + fmtTime(h.signed_at) : ''}${h.superseded_at ? ' · 替换于 ' + fmtTime(h.superseded_at) : ''}</span>
+            </div>
+            ${h.note ? `<div class="muted">说明：${esc(h.note)}</div>` : ''}
+            <details class="handover-snap-details">
+              <summary class="muted">快照：已完成 ${doneCount}/${cueResults.length} · 未完成 ${pendingCues.length} · 复核申请 ${reqs.length} · 未解除故障 ${faults.length}（流水固定到第 ${snap.latest_event_id == null ? '0' : snap.latest_event_id} 条）</summary>
+              ${pendingCues.length ? `
+              <table class="hint-table" style="margin-top:6px">
+                <thead><tr><th style="width:90px">未完成编号</th><th>快照阻塞原因</th></tr></thead>
+                <tbody>${pendingCues.map(p => `<tr><td><b>${esc(p.label)}</b></td><td>${esc(p.reason_text)}</td></tr>`).join('')}</tbody>
+              </table>` : '<p class="muted" style="margin:6px 0">快照时无未完成提示。</p>'}
+              ${faults.length ? `<div class="muted" style="margin-top:4px">未解除故障：${faults.map(f => esc(f.label)).join('、')}</div>` : ''}
+              ${reqs.length ? `<div class="muted" style="margin-top:2px">复核申请：${reqs.map(q => esc(q.label) + '（' + REQUEST_STATUS_TEXT[q.status] + '）').join('、')}</div>` : ''}
+            </details>
+          </li>`;
+        }).join('')}
+      </ul>
+    </details>`;
+}
+
+async function doHandoverSubmit(perfId) {
+  const st = getHandoverState(perfId);
+  const handedBy = (document.getElementById('handover-handed-by').value || '').trim();
+  const receivedBy = (document.getElementById('handover-received-by').value || '').trim();
+  const note = (document.getElementById('handover-note').value || '').trim();
+  st.handedBy = handedBy; st.receivedBy = receivedBy; st.note = note;
+  if (!handedBy) return toast('请填写交班人', true);
+  if (!receivedBy) return toast('请填写接班人', true);
+  if (handedBy === receivedBy) return toast('交班人与接班人不能为同一人', true);
+  try {
+    const r = await api(`/api/performances/${perfId}/handover`, {
+      method: 'POST', body: { handed_by: handedBy, received_by: receivedBy, note },
+    });
+    st.signBy = '';
+    toast(`交接单 #${r.handover.id} 已生成，等待接班人 ${receivedBy} 签收`);
+  } catch (e) { return toast(e.message, true); }
+  stopPolling();
+  renderPerformance(perfId);
+}
+
+async function doHandoverResubmit(perfId, handover) {
+  const st = getHandoverState(perfId);
+  const handedBy = window.prompt('重提交接单须为原交班人，请确认交班人姓名：', handover.handed_by);
+  if (handedBy == null) return;
+  if (!handedBy.trim()) return toast('交班人不能为空', true);
+  const note = window.prompt('交接说明（可修改，留空则清空）：', handover.note || '') ;
+  if (note == null) return;
+  try {
+    const r = await api(`/api/performances/${perfId}/handover`, {
+      method: 'POST',
+      body: { handed_by: handedBy.trim(), received_by: handover.received_by, note: note.trim() },
+    });
+    toast(`已由交班人重提，旧单作废、新单 #${r.handover.id} 等待签收`);
+  } catch (e) { return toast(e.message, true); }
+  stopPolling();
+  renderPerformance(perfId);
+}
+
+async function doHandoverSign(perfId) {
+  const st = getHandoverState(perfId);
+  const operator = (document.getElementById('handover-sign-by').value || '').trim();
+  st.signBy = operator;
+  if (!operator) return toast('请填写签收人（接班人本人）', true);
+  try {
+    const r = await api(`/api/performances/${perfId}/handover/sign`, {
+      method: 'POST', body: { operator },
+    });
+    st.signBy = '';
+    toast(`交接单 #${r.handover.id} 已签收，交接完成`);
+  } catch (e) {
+    if (e.data && e.data.groups) toast(`核对未通过：${e.data.diff_count} 项差异，见交接面板`, true);
+    else toast(e.message, true);
+  }
+  stopPolling();
+  renderPerformance(perfId);
 }
 
 /* ---------- 现场成组处置面板 ---------- */
